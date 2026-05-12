@@ -1,56 +1,81 @@
-name: Xray Direct IP
+name: Xray Direct IP with Auto-Update
 
 on:
-  workflow_dispatch:          # manual start
+  workflow_dispatch:          # manual trigger
   schedule:
     - cron: '0 */5 * * *'    # every 5 hours (under 6h limit)
+
+# Grant write permission to the GITHUB_TOKEN for pushing commits
+permissions:
+  contents: write
 
 jobs:
   run-xray:
     runs-on: ubuntu-latest
-    timeout-minutes: 360      # 6 hours max
-    steps:
-      - uses: actions/checkout@v4
+    timeout-minutes: 360      # 6 hour max
 
-      - name: Install Xray
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Create Xray configuration file
         run: |
-          wget -O xray.zip https://github.com/XTLS/Xray-core/releases/latest/download/Xray-linux-64.zip
-          unzip -o xray.zip
+          cat > config.json <<EOF
+          {
+            "inbounds": [{
+              "port": 443,
+              "listen": "0.0.0.0",
+              "protocol": "vless",
+              "settings": {
+                "clients": [{"id": "550e8400-e29b-41d4-a716-446655440000"}],
+                "decryption": "none"
+              },
+              "streamSettings": {
+                "network": "tcp",
+                "security": "none"
+              }
+            }],
+            "outbounds": [{"protocol": "freedom"}]
+          }
+          EOF
+
+      - name: Install Xray core
+        run: |
+          wget -q -O xray.zip https://github.com/XTLS/Xray-core/releases/latest/download/Xray-linux-64.zip
+          unzip -q -o xray.zip
           chmod +x xray
           sudo mv xray /usr/local/bin/
           rm -f xray.zip
 
-      - name: Start Xray server
+      - name: Start Xray server in background
         run: |
           sudo mkdir -p /usr/local/etc/xray
           sudo cp config.json /usr/local/etc/xray/config.json
-          # Bind to 0.0.0.0, run in background
           sudo nohup /usr/local/bin/xray run -c /usr/local/etc/xray/config.json > xray.log 2>&1 &
+          sleep 3   # allow Xray to bind to port
 
       - name: Get public IP and build VLESS link
         id: ip
         run: |
-          # Runner can reach external sites (unlike your client)
           PUBLIC_IP=$(curl -s ifconfig.me)
           echo "public_ip=$PUBLIC_IP" >> $GITHUB_OUTPUT
           VLESS_LINK="vless://550e8400-e29b-41d4-a716-446655440000@$PUBLIC_IP:443?encryption=none&security=none&type=tcp#GitHubActions"
           echo "vless_link=$VLESS_LINK" >> $GITHUB_OUTPUT
 
-      - name: Update IP file in repo
+      - name: Update ip.txt in repository
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           echo "Last updated: $(date)" > ip.txt
           echo "Public IP: ${{ steps.ip.outputs.public_ip }}" >> ip.txt
           echo "VLESS Link: ${{ steps.ip.outputs.vless_link }}" >> ip.txt
-          # Commit and push the updated ip.txt
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add ip.txt
-          git commit -m "Update Xray IP [skip ci]" || echo "No changes"
+          git commit -m "Update Xray IP [skip ci]" || echo "No changes to commit"
           git push
 
-      - name: Print link in log (fallback)
+      - name: Print link in log (for reference)
         run: |
           echo "=========================================="
           echo "VLESS Link: ${{ steps.ip.outputs.vless_link }}"
