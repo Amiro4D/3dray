@@ -1,24 +1,21 @@
-name: Xray Direct IP with Auto-Update
+name: Xray Persistent Server (6h Uptime)
 
 on:
-  workflow_dispatch:          # manual trigger
+  workflow_dispatch:          # manual start
   schedule:
-    - cron: '0 */5 * * *'    # every 5 hours (under 6h limit)
+    - cron: '0 */5 * * *'    # every 5 hours to overlap before expiry
 
-# Grant write permission to the GITHUB_TOKEN for pushing commits
 permissions:
   contents: write
 
 jobs:
   run-xray:
     runs-on: ubuntu-latest
-    timeout-minutes: 360      # 6 hour max
-
+    timeout-minutes: 360      # 6 hour absolute maximum (Actions hard limit)
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      - name: Create Xray configuration file
+      - name: Create Xray config
         run: |
           cat > config.json <<EOF
           {
@@ -39,22 +36,22 @@ jobs:
           }
           EOF
 
-      - name: Install Xray core
+      - name: Install Xray
         run: |
           wget -q -O xray.zip https://github.com/XTLS/Xray-core/releases/latest/download/Xray-linux-64.zip
           unzip -q -o xray.zip
           chmod +x xray
           sudo mv xray /usr/local/bin/
-          rm -f xray.zip
+          rm xray.zip
 
-      - name: Start Xray server in background
+      - name: Start Xray server
         run: |
           sudo mkdir -p /usr/local/etc/xray
           sudo cp config.json /usr/local/etc/xray/config.json
           sudo nohup /usr/local/bin/xray run -c /usr/local/etc/xray/config.json > xray.log 2>&1 &
-          sleep 3   # allow Xray to bind to port
+          sleep 3   # let Xray bind to port
 
-      - name: Get public IP and build VLESS link
+      - name: Get public IP and generate link
         id: ip
         run: |
           PUBLIC_IP=$(curl -s ifconfig.me)
@@ -62,7 +59,7 @@ jobs:
           VLESS_LINK="vless://550e8400-e29b-41d4-a716-446655440000@$PUBLIC_IP:443?encryption=none&security=none&type=tcp#GitHubActions"
           echo "vless_link=$VLESS_LINK" >> $GITHUB_OUTPUT
 
-      - name: Update ip.txt in repository
+      - name: Write link to repository
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
@@ -72,11 +69,17 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add ip.txt
-          git commit -m "Update Xray IP [skip ci]" || echo "No changes to commit"
+          git commit -m "Update Xray IP [skip ci]" || true
           git push
 
-      - name: Print link in log (for reference)
+      - name: Print link in logs
         run: |
           echo "=========================================="
           echo "VLESS Link: ${{ steps.ip.outputs.vless_link }}"
+          echo "Server will run for ~6 hours (until job stops)"
           echo "=========================================="
+
+      - name: Keep runner alive for 6 hours
+        run: |
+          echo "Keeping runner alive for 350 minutes (5h 50m) – Xray active"
+          sleep 350m
