@@ -1,0 +1,57 @@
+name: Xray Direct IP
+
+on:
+  workflow_dispatch:          # manual start
+  schedule:
+    - cron: '0 */5 * * *'    # every 5 hours (under 6h limit)
+
+jobs:
+  run-xray:
+    runs-on: ubuntu-latest
+    timeout-minutes: 360      # 6 hours max
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Xray
+        run: |
+          wget -O xray.zip https://github.com/XTLS/Xray-core/releases/latest/download/Xray-linux-64.zip
+          unzip -o xray.zip
+          chmod +x xray
+          sudo mv xray /usr/local/bin/
+          rm -f xray.zip
+
+      - name: Start Xray server
+        run: |
+          sudo mkdir -p /usr/local/etc/xray
+          sudo cp config.json /usr/local/etc/xray/config.json
+          # Bind to 0.0.0.0, run in background
+          sudo nohup /usr/local/bin/xray run -c /usr/local/etc/xray/config.json > xray.log 2>&1 &
+
+      - name: Get public IP and build VLESS link
+        id: ip
+        run: |
+          # Runner can reach external sites (unlike your client)
+          PUBLIC_IP=$(curl -s ifconfig.me)
+          echo "public_ip=$PUBLIC_IP" >> $GITHUB_OUTPUT
+          VLESS_LINK="vless://550e8400-e29b-41d4-a716-446655440000@$PUBLIC_IP:443?encryption=none&security=none&type=tcp#GitHubActions"
+          echo "vless_link=$VLESS_LINK" >> $GITHUB_OUTPUT
+
+      - name: Update IP file in repo
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          echo "Last updated: $(date)" > ip.txt
+          echo "Public IP: ${{ steps.ip.outputs.public_ip }}" >> ip.txt
+          echo "VLESS Link: ${{ steps.ip.outputs.vless_link }}" >> ip.txt
+          # Commit and push the updated ip.txt
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add ip.txt
+          git commit -m "Update Xray IP [skip ci]" || echo "No changes"
+          git push
+
+      - name: Print link in log (fallback)
+        run: |
+          echo "=========================================="
+          echo "VLESS Link: ${{ steps.ip.outputs.vless_link }}"
+          echo "=========================================="
