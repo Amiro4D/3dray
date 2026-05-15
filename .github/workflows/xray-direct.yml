@@ -1,9 +1,7 @@
-name: MHR Relay Server (6h Uptime)
+name: MHR Relay Server (Manual – 6h)
 
 on:
-  workflow_dispatch:
-  schedule:
-    - cron: '0 */5 * * *'   # re-run every 5 hours to avoid gap
+  workflow_dispatch:          # manual start only, no schedule
 
 permissions:
   contents: write
@@ -12,6 +10,7 @@ jobs:
   relay:
     runs-on: ubuntu-latest
     timeout-minutes: 360      # 6 hours max
+
     steps:
       - uses: actions/checkout@v4
 
@@ -25,7 +24,7 @@ jobs:
         run: |
           PUBLIC_IP=$(curl -s ifconfig.me)
           echo "public_ip=$PUBLIC_IP" >> $GITHUB_OUTPUT
-          # Overwrite ip.txt with just the IP
+          # Write only the IP to ip.txt (no extra text)
           echo "$PUBLIC_IP" > ip.txt
 
       - name: Commit IP to repo
@@ -38,13 +37,12 @@ jobs:
           git commit -m "Update relay IP [skip ci]" || true
           git push
 
-      - name: Create relay server script
+      - name: Create relay server script (no auth)
         run: |
           cat > relay.mjs <<'EOF'
           import http from 'node:http';
 
-          const AUTH_KEY = process.env.AUTH_KEY || 'CHANGE_ME';
-          const PORT = process.env.PORT || 443;
+          const PORT = 8080;   // plain HTTP, safe for Google Apps Script
 
           const SKIP_HEADERS = new Set([
             'host','connection','content-length','transfer-encoding',
@@ -58,6 +56,7 @@ jobs:
           async function processOne(item, selfHost) {
             if (!item || typeof item !== 'object') return { e: 'bad item' };
             if (!item.u || !/^https?:\/\//i.test(item.u)) return { e: 'bad url' };
+
             let url;
             try { url = new URL(item.u); } catch { return { e: 'bad url' }; }
             if (url.hostname === selfHost) return { e: 'self-fetch blocked' };
@@ -93,6 +92,7 @@ jobs:
               res.writeHead(405).end(JSON.stringify({ e: 'method not allowed' }));
               return;
             }
+
             const chunks = [];
             req.on('data', c => chunks.push(c));
             req.on('end', async () => {
@@ -101,11 +101,10 @@ jobs:
                 res.writeHead(400).end(JSON.stringify({ e: 'bad json' }));
                 return;
               }
-              if (body.k !== AUTH_KEY) {
-                res.writeHead(401).end(JSON.stringify({ e: 'unauthorized' }));
-                return;
-              }
+
+              // No auth – same as original CFW
               const selfHost = req.headers.host?.split(':')[0] || 'localhost';
+
               let result;
               if (Array.isArray(body.q)) {
                 if (body.q.length === 0) {
@@ -117,20 +116,19 @@ jobs:
               } else {
                 result = await processOne(body, selfHost).catch(e => ({e:String(e)}));
               }
+
               res.writeHead(result.e ? 502 : 200, {'Content-Type':'application/json'});
               res.end(JSON.stringify(result));
             });
           });
 
-          server.listen(PORT, '0.0.0.0', () => console.log(`Relay on port ${PORT}`));
+          server.listen(PORT, '0.0.0.0', () => console.log(`Relay listening on port ${PORT}`));
           EOF
 
-      - name: Start relay server on port 443
-        env:
-          AUTH_KEY: ${{ secrets.RELAY_AUTH_KEY }}
+      - name: Start relay server on port 8080
         run: |
-          sudo node relay.mjs &
-          sleep 3   # wait for server to bind
+          node relay.mjs &
+          sleep 3
 
       - name: Keep alive for 350 minutes
         run: |
