@@ -1,136 +1,85 @@
-name: MHR Relay Server (Manual – 6h)
+name: Xray Persistent Server (6h Uptime)
 
 on:
-  workflow_dispatch:          # manual start only, no schedule
+  workflow_dispatch:          # manual start
+  schedule:
+    - cron: '0 */5 * * *'    # every 5 hours to overlap before expiry
 
 permissions:
   contents: write
 
 jobs:
-  relay:
+  run-xray:
     runs-on: ubuntu-latest
-    timeout-minutes: 360      # 6 hours max
-
+    timeout-minutes: 360      # 6 hour absolute maximum (Actions hard limit)
     steps:
       - uses: actions/checkout@v4
 
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: 20
+      - name: Create Xray config
+        run: |
+          cat > config.json <<EOF
+          {
+            "inbounds": [{
+              "port": 443,
+              "listen": "0.0.0.0",
+              "protocol": "vless",
+              "settings": {
+                "clients": [{"id": "550e8400-e29b-41d4-a716-446655440000"}],
+                "decryption": "none"
+              },
+              "streamSettings": {
+                "network": "tcp",
+                "security": "none"
+              }
+            }],
+            "outbounds": [{"protocol": "freedom"}]
+          }
+          EOF
 
-      - name: Get public IP
+      - name: Install Xray
+        run: |
+          wget -q -O xray.zip https://github.com/XTLS/Xray-core/releases/latest/download/Xray-linux-64.zip
+          unzip -q -o xray.zip
+          chmod +x xray
+          sudo mv xray /usr/local/bin/
+          rm xray.zip
+
+      - name: Start Xray server
+        run: |
+          sudo mkdir -p /usr/local/etc/xray
+          sudo cp config.json /usr/local/etc/xray/config.json
+          sudo nohup /usr/local/bin/xray run -c /usr/local/etc/xray/config.json > xray.log 2>&1 &
+          sleep 3   # let Xray bind to port
+
+      - name: Get public IP and generate link
         id: ip
         run: |
           PUBLIC_IP=$(curl -s ifconfig.me)
           echo "public_ip=$PUBLIC_IP" >> $GITHUB_OUTPUT
-          # Write only the IP to ip.txt (no extra text)
-          echo "$PUBLIC_IP" > ip.txt
+          VLESS_LINK="vless://550e8400-e29b-41d4-a716-446655440000@$PUBLIC_IP:443?encryption=none&security=none&type=tcp#GitHubActions"
+          echo "vless_link=$VLESS_LINK" >> $GITHUB_OUTPUT
 
-      - name: Commit IP to repo
+      - name: Write link to repository
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
+          echo "Last updated: $(date)" > ip.txt
+          echo "Public IP: ${{ steps.ip.outputs.public_ip }}" >> ip.txt
+          echo "VLESS Link: ${{ steps.ip.outputs.vless_link }}" >> ip.txt
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add ip.txt
-          git commit -m "Update relay IP [skip ci]" || true
+          git commit -m "Update Xray IP [skip ci]" || true
           git push
 
-      - name: Create relay server script (no auth)
+      - name: Print link in logs
         run: |
-          cat > relay.mjs <<'EOF'
-          import http from 'node:http';
+          echo "=========================================="
+          echo "VLESS Link: ${{ steps.ip.outputs.vless_link }}"
+          echo "Server will run for ~6 hours (until job stops)"
+          echo "=========================================="
 
-          const PORT = 8080;   // plain HTTP, safe for Google Apps Script
-
-          const SKIP_HEADERS = new Set([
-            'host','connection','content-length','transfer-encoding',
-            'proxy-connection','proxy-authorization','priority','te',
-          ]);
-
-          function base64ToBytes(b64) {
-            return Uint8Array.from(Buffer.from(b64, 'base64'));
-          }
-
-          async function processOne(item, selfHost) {
-            if (!item || typeof item !== 'object') return { e: 'bad item' };
-            if (!item.u || !/^https?:\/\//i.test(item.u)) return { e: 'bad url' };
-
-            let url;
-            try { url = new URL(item.u); } catch { return { e: 'bad url' }; }
-            if (url.hostname === selfHost) return { e: 'self-fetch blocked' };
-
-            const headers = new Headers();
-            if (item.h) for (const [k,v] of Object.entries(item.h))
-              if (!SKIP_HEADERS.has(k.toLowerCase())) headers.set(k,v);
-
-            const method = (item.m || 'GET').toUpperCase();
-            const opts = { method, headers, redirect: item.r === false ? 'manual' : 'follow' };
-
-            if (item.b && method !== 'GET' && method !== 'HEAD') {
-              try { opts.body = base64ToBytes(item.b); } catch { return { e: 'bad body base64' }; }
-              if (item.ct && !headers.has('content-type')) headers.set('content-type', item.ct);
-            }
-
-            try {
-              const resp = await fetch(item.u, opts);
-              const h = {}; resp.headers.forEach((v,k) => h[k]=v);
-              let bodyB64 = '';
-              if (resp.body) {
-                const buf = await resp.arrayBuffer();
-                bodyB64 = Buffer.from(buf).toString('base64');
-              }
-              return { s: resp.status, h, b: bodyB64 };
-            } catch (err) {
-              return { e: 'fetch failed: ' + String(err) };
-            }
-          }
-
-          const server = http.createServer(async (req, res) => {
-            if (req.method !== 'POST') {
-              res.writeHead(405).end(JSON.stringify({ e: 'method not allowed' }));
-              return;
-            }
-
-            const chunks = [];
-            req.on('data', c => chunks.push(c));
-            req.on('end', async () => {
-              let body;
-              try { body = JSON.parse(Buffer.concat(chunks).toString()); } catch {
-                res.writeHead(400).end(JSON.stringify({ e: 'bad json' }));
-                return;
-              }
-
-              // No auth – same as original CFW
-              const selfHost = req.headers.host?.split(':')[0] || 'localhost';
-
-              let result;
-              if (Array.isArray(body.q)) {
-                if (body.q.length === 0) {
-                  res.writeHead(200, {'Content-Type':'application/json'}).end(JSON.stringify({q:[]}));
-                  return;
-                }
-                const results = await Promise.all(body.q.map(item => processOne(item, selfHost).catch(e => ({e:String(e)}))));
-                result = { q: results };
-              } else {
-                result = await processOne(body, selfHost).catch(e => ({e:String(e)}));
-              }
-
-              res.writeHead(result.e ? 502 : 200, {'Content-Type':'application/json'});
-              res.end(JSON.stringify(result));
-            });
-          });
-
-          server.listen(PORT, '0.0.0.0', () => console.log(`Relay listening on port ${PORT}`));
-          EOF
-
-      - name: Start relay server on port 8080
+      - name: Keep runner alive for 6 hours
         run: |
-          node relay.mjs &
-          sleep 3
-
-      - name: Keep alive for 350 minutes
-        run: |
-          echo "Relay running. IP: $(cat ip.txt)"
+          echo "Keeping runner alive for 350 minutes (5h 50m) – Xray active"
           sleep 350m
