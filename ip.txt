@@ -1,3 +1,3 @@
-Last updated: Sat Aug 22 20:16:26 UTC 2026
-Public IP: 172.208.126.100
-VLESS Link: vless://550e8400-e29b-41d4-a716-446655440000@172.208.126.100:443?encryption=none&security=none&type=tcp#GitHubActions
+Last updated: Sun Aug 23 01:01:58 UTC 2026
+Public IP: 20.40.214.241
+VLESS Link: vless://550e8400-e29b-41d4-a716-446655440000@20.40.214.241:443?encryption=none&security=none&type=tcp#GitHubActions
